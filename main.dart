@@ -217,7 +217,7 @@ class _StudyPageState extends State<StudyPage> {
     if (words.isEmpty) return const Center(child: CircularProgressIndicator());
     final w = words[index % words.length];
     return Padding(padding: const EdgeInsets.all(20), child: Column(children: [
-      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+      Row(mainAxisAlignment: MainAxisAlignment.center, children: [
         Text('단어 ${index + 1} / ${words.length}', style: const TextStyle(color: Colors.black54)),
         Text(w.pos, style: const TextStyle(color: Colors.black45)),
       ]),
