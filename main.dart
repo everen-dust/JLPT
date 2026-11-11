@@ -18,9 +18,7 @@ class JlptApp extends StatelessWidget {
     debugShowCheckedModeBanner: false,
     theme: ThemeData(
       useMaterial3: true,
-      colorScheme: ColorScheme.fromSeed(
-  seedColor: Colors.deepPurple,
-),
+      colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple,),
       scaffoldBackgroundColor: const Color(0xFFFAFAFA),
       appBarTheme: const AppBarTheme(backgroundColor: Color(0xFFFAFAFA), elevation: 0),
       inputDecorationTheme: InputDecorationTheme(
