@@ -25,11 +25,19 @@ jobs:
         with:
           channel: stable
 
-      - name: Create Android project files
+      - name: Create Android project
         run: flutter create --platforms=android --project-name=jlpt --org=com.example .
+
+      - name: Copy JLPT source code
+        run: |
+          mkdir -p lib
+          cp main.dart lib/main.dart
 
       - name: Get dependencies
         run: flutter pub get
+
+      - name: Analyze code
+        run: flutter analyze --no-pub
 
       - name: Build APK
         run: flutter build apk --release
