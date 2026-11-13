@@ -61,7 +61,10 @@ class WordDb {
       for (final item in sampleWords) {
         await db.insert('words', {...item, 'dueAt': now});
       }
-    });
+        });
+
+    await _seedMissingWords(_database!);
+
     return _database!;
   }
 
