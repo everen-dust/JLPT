@@ -65,6 +65,31 @@ class WordDb {
     return _database!;
   }
 
+Future<void> _seedMissingWords(Database db) async {
+  final rows = await db.query(
+    'words',
+    columns: ['jp', 'reading'],
+  );
+
+  final existing = rows
+      .map((r) => '${r['jp']}|${r['reading']}')
+      .toSet();
+
+  final now = DateTime.now().millisecondsSinceEpoch;
+
+  for (final item in sampleWords) {
+    final key = '${item['jp']}|${item['reading']}';
+
+    if (!existing.contains(key)) {
+      await db.insert('words', {
+        ...item,
+        'dueAt': now,
+      });
+      existing.add(key);
+    }
+  }
+}
+
   Future<List<Word>> all() async {
     final rows = await (await database).query('words', orderBy: 'jp');
     return rows.map(Word.new).toList();
