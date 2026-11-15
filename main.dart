@@ -418,8 +418,14 @@ class Metric extends StatelessWidget {
   )));
 }
 
-class Dashboard extends StatelessWidget {
+class Dashboard extends StatefulWidget {
   const Dashboard({super.key});
+
+  @override
+  State<Dashboard> createState() => _DashboardState();
+}
+
+class _DashboardState extends State<Dashboard> {
   @override
   Widget build(BuildContext context) => FutureBuilder<List<Word>>(
     future: WordDb.instance.all(),
