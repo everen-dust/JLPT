@@ -455,7 +455,52 @@ bool updating = false;
             icon: const Icon(Icons.play_arrow), label: const Text('단어 학습 시작')),
         ]))),
         const SizedBox(height: 10),
-        const Text('초기 버전에는 예시 단어 20개가 포함되어 있습니다.', style: TextStyle(color: Colors.black45, fontSize: 12)),
+        const OutlinedButton.icon(
+  onPressed: updating
+      ? null
+      : () async {
+          setState(() => updating = true);
+
+          try {
+            final count =
+                await WordDb.instance.syncRemoteWords();
+
+            if (!mounted) return;
+
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  count == 0
+                      ? '새로운 단어가 없습니다.'
+                      : '$count개의 단어를 추가했습니다.',
+                ),
+              ),
+            );
+
+            setState(() {});
+          } catch (e) {
+            if (!mounted) return;
+
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('업데이트에 실패했습니다. 인터넷을 확인해 주세요.'),
+              ),
+            );
+          } finally {
+            if (mounted) {
+              setState(() => updating = false);
+            }
+          }
+        },
+  icon: updating
+      ? const SizedBox(
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        )
+      : const Icon(Icons.sync),
+  label: Text(updating ? '업데이트 중...' : '단어 목록 업데이트'),
+),
       ]);
     },
   );
