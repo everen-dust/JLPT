@@ -426,6 +426,7 @@ class Dashboard extends StatefulWidget {
 }
 
 class _DashboardState extends State<Dashboard> {
+bool updating = false;
   @override
   Widget build(BuildContext context) => FutureBuilder<List<Word>>(
     future: WordDb.instance.all(),
