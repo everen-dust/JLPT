@@ -1,24 +1,23 @@
 
-import 'dart:async';
 import 'dart:convert';
-
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
-import 'package:http/http.dart' as http;
 
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Db.instance.database;
 
-  await WordDb.instance.database;
+  // 내장 단어를 먼저 등록하여 인터넷이 없어도 학습 가능
+  await Db.instance.seedLocal();
 
-  // 앱 시작 시 원격 단어 목록 자동 확인
+  // 실행할 때 GitHub 단어 목록 확인
   try {
-    await WordDb.instance.syncRemoteWords();
-  } catch (_) {
-    // 인터넷 연결이 없더라도 앱은 실행
-  }
+    await Db.instance.sync();
+  } catch (_) {}
 
   runApp(const JlptApp());
 }
@@ -34,135 +33,134 @@ class JlptApp extends StatelessWidget {
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.deepPurple,
+          seedColor: const Color(0xFF6556A8),
         ),
-        scaffoldBackgroundColor: const Color(0xFFFAFAFA),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFFFAFAFA),
-          elevation: 0,
-        ),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: Colors.white,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-          ),
-        ),
+        scaffoldBackgroundColor: const Color(0xFFF8F7FB),
       ),
-      home: const MainShell(),
+      home: const Shell(),
     );
   }
 }
 
 class Word {
   final int id;
-  final int intervalDays;
-  final int correctCount;
-  final int wrongCount;
-
   final String jp;
   final String reading;
   final String meaning;
   final String pos;
   final String example;
   final String exampleMeaning;
-
+  final int interval;
+  final int correct;
+  final int wrong;
   final DateTime dueAt;
 
   Word(Map<String, Object?> m)
       : id = m['id'] as int,
-        jp = m['jp'] as String,
-        reading = m['reading'] as String,
-        meaning = m['meaning'] as String,
-        pos = m['pos'] as String,
-        example = m['example'] as String,
-        exampleMeaning = m['exampleMeaning'] as String,
-        intervalDays = m['intervalDays'] as int,
-        correctCount = m['correctCount'] as int,
-        wrongCount = m['wrongCount'] as int,
+        jp = (m['jp'] ?? '') as String,
+        reading = (m['reading'] ?? '') as String,
+        meaning = (m['meaning'] ?? '') as String,
+        pos = (m['pos'] ?? '기타') as String,
+        example = (m['example'] ?? '') as String,
+        exampleMeaning =
+            (m['exampleMeaning'] ?? '') as String,
+        interval = (m['intervalDays'] ?? 0) as int,
+        correct = (m['correctCount'] ?? 0) as int,
+        wrong = (m['wrongCount'] ?? 0) as int,
         dueAt = DateTime.fromMillisecondsSinceEpoch(
-          m['dueAt'] as int,
+          (m['dueAt'] ?? 0) as int,
         );
 }
 
-class WordDb {
-  WordDb._();
+class Db {
+  Db._();
 
-  static final instance = WordDb._();
+  static final instance = Db._();
 
-  static const String wordsUrl =
+  static const remote =
       'https://raw.githubusercontent.com/everen-dust/JLPT/main/words.json';
 
-  Database? _database;
+  Database? _db;
 
   Future<Database> get database async {
-    if (_database != null) return _database!;
+    if (_db != null) return _db!;
 
-    final base = await getDatabasesPath();
+    final dir = await getDatabasesPath();
 
-    _database = await openDatabase(
-      p.join(base, 'jlpt_words.db'),
+    _db = await openDatabase(
+      p.join(dir, 'jlpt_words.db'),
       version: 1,
-      onCreate: (db, version) async {
-        await db.execute('''
+      onCreate: (d, v) async {
+        await d.execute('''
           CREATE TABLE words(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            jp TEXT,
-            reading TEXT,
-            meaning TEXT,
-            pos TEXT,
-            example TEXT,
-            exampleMeaning TEXT,
+            jp TEXT NOT NULL,
+            reading TEXT NOT NULL,
+            meaning TEXT NOT NULL,
+            pos TEXT DEFAULT '기타',
+            example TEXT DEFAULT '',
+            exampleMeaning TEXT DEFAULT '',
             intervalDays INTEGER DEFAULT 0,
-            dueAt INTEGER,
+            dueAt INTEGER NOT NULL,
             correctCount INTEGER DEFAULT 0,
-            wrongCount INTEGER DEFAULT 0
+            wrongCount INTEGER DEFAULT 0,
+            UNIQUE(jp, reading)
           )
         ''');
       },
     );
 
-    return _database!;
+    return _db!;
   }
 
-  // GitHub 단어 목록 업데이트
-  Future<int> syncRemoteWords() async {
+  Future<int> seedLocal() async {
+    final raw = await rootBundle.loadString(
+      'assets/words.json',
+    );
+    return importJson(raw);
+  }
+
+  Future<int> sync() async {
     final response = await http
-        .get(Uri.parse(wordsUrl))
+        .get(Uri.parse(remote))
         .timeout(const Duration(seconds: 15));
 
     if (response.statusCode != 200) {
-      throw Exception('단어 목록을 가져오지 못했습니다.');
+      throw Exception('단어 파일을 불러오지 못했습니다.');
     }
 
-    final decoded = jsonDecode(
+    return importJson(
       utf8.decode(response.bodyBytes),
     );
+  }
 
-    if (decoded is! List) {
-      throw const FormatException(
-        'words.json 형식이 올바르지 않습니다.',
-      );
+  Future<int> importJson(String raw) async {
+    final data = jsonDecode(raw);
+
+    if (data is! List) {
+      throw const FormatException('words.json 형식 오류');
     }
 
-    final db = await database;
-    int inserted = 0;
+    final d = await database;
+    int added = 0;
 
-    await db.transaction((txn) async {
-      for (final entry in decoded) {
-        if (entry is! Map) continue;
+    await d.transaction((tx) async {
+      for (final item in data) {
+        if (item is! Map) continue;
 
-        final jp = (entry['jp'] ?? '').toString().trim();
+        final jp = (item['jp'] ?? '').toString().trim();
         final reading =
-            (entry['reading'] ?? '').toString().trim();
+            (item['reading'] ?? '').toString().trim();
         final meaning =
-            (entry['meaning'] ?? '').toString().trim();
+            (item['meaning'] ?? '').toString().trim();
 
-        if (jp.isEmpty || reading.isEmpty || meaning.isEmpty) {
+        if (jp.isEmpty ||
+            reading.isEmpty ||
+            meaning.isEmpty) {
           continue;
         }
 
-        final found = await txn.query(
+        final old = await tx.query(
           'words',
           columns: ['id'],
           where: 'jp = ? AND reading = ?',
@@ -170,28 +168,31 @@ class WordDb {
           limit: 1,
         );
 
-        // 기존 단어와 학습 기록은 그대로 유지
-        if (found.isNotEmpty) continue;
+        if (old.isNotEmpty) continue;
 
-        await txn.insert('words', {
-          'jp': jp,
-          'reading': reading,
-          'meaning': meaning,
-          'pos': (entry['pos'] ?? '기타').toString(),
-          'example': (entry['example'] ?? '').toString(),
-          'exampleMeaning':
-              (entry['exampleMeaning'] ?? '').toString(),
-          'intervalDays': 0,
-          'dueAt': DateTime.now().millisecondsSinceEpoch,
-          'correctCount': 0,
-          'wrongCount': 0,
-        });
+        await tx.insert(
+          'words',
+          {
+            'jp': jp,
+            'reading': reading,
+            'meaning': meaning,
+            'pos': (item['pos'] ?? '기타').toString(),
+            'example': (item['example'] ?? '').toString(),
+            'exampleMeaning':
+                (item['exampleMeaning'] ?? '').toString(),
+            'intervalDays': 0,
+            'dueAt': DateTime.now().millisecondsSinceEpoch,
+            'correctCount': 0,
+            'wrongCount': 0,
+          },
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
 
-        inserted++;
+        added++;
       }
     });
 
-    return inserted;
+    return added;
   }
 
   Future<List<Word>> all() async {
@@ -216,63 +217,56 @@ class WordDb {
     return rows.map(Word.new).toList();
   }
 
-  Future<void> answer(int id, bool correct) async {
-    final db = await database;
-
-    final rows = await db.query(
-      'words',
-      where: 'id = ?',
-      whereArgs: [id],
-      limit: 1,
-    );
-
-    if (rows.isEmpty) return;
-
-    final word = Word(rows.first);
-
-    final interval = correct
-        ? (word.intervalDays == 0
+  Future<void> answer(Word w, bool ok) async {
+    final days = ok
+        ? (w.interval == 0
             ? 1
-            : word.intervalDays < 3
+            : w.interval < 3
                 ? 3
-                : word.intervalDays < 7
+                : w.interval < 7
                     ? 7
                     : 14)
         : 0;
 
-    final due = correct
-        ? DateTime.now().add(Duration(days: interval))
+    final due = ok
+        ? DateTime.now().add(Duration(days: days))
         : DateTime.now().add(
             const Duration(minutes: 10),
           );
 
-    await db.update(
+    await (await database).update(
       'words',
       {
-        'intervalDays': interval,
+        'intervalDays': days,
         'dueAt': due.millisecondsSinceEpoch,
-        'correctCount':
-            word.correctCount + (correct ? 1 : 0),
-        'wrongCount':
-            word.wrongCount + (correct ? 0 : 1),
+        'correctCount': w.correct + (ok ? 1 : 0),
+        'wrongCount': w.wrong + (ok ? 0 : 1),
       },
       where: 'id = ?',
-      whereArgs: [id],
+      whereArgs: [w.id],
     );
   }
 }
 
-class MainShell extends StatefulWidget {
-  const MainShell({super.key});
+class Shell extends StatefulWidget {
+  const Shell({super.key});
 
   @override
-  State<MainShell> createState() => _MainShellState();
+  State<Shell> createState() => _ShellState();
 }
 
-class _MainShellState extends State<MainShell> {
-  int index = 0;
+class _ShellState extends State<Shell> {
+  int tab = 0;
 
-  final labels = [
+  final pages = const [
+    Home(),
+    Learn(),
+    Quiz(),
+    Review(),
+    Stats(),
+  ];
+
+  final titles = const [
     'JLPT',
     '단어 학습',
     '단어 시험',
@@ -282,30 +276,20 @@ class _MainShellState extends State<MainShell> {
 
   @override
   Widget build(BuildContext context) {
-    final pages = [
-      const Dashboard(),
-      const StudyPage(),
-      const QuizPage(),
-      const ReviewPage(),
-      const StatsPage(),
-    ];
-
     return Scaffold(
       appBar: AppBar(
         title: Text(
-          labels[index],
+          titles[tab],
           style: const TextStyle(
-            fontWeight: FontWeight.w700,
+            fontWeight: FontWeight.bold,
           ),
         ),
       ),
-      body: SafeArea(
-        child: pages[index],
-      ),
+      body: SafeArea(child: pages[tab]),
       bottomNavigationBar: NavigationBar(
-        selectedIndex: index,
-        onDestinationSelected: (value) {
-          setState(() => index = value);
+        selectedIndex: tab,
+        onDestinationSelected: (v) {
+          setState(() => tab = v);
         },
         destinations: const [
           NavigationDestination(
@@ -321,7 +305,7 @@ class _MainShellState extends State<MainShell> {
             label: '시험',
           ),
           NavigationDestination(
-            icon: Icon(Icons.refresh),
+            icon: Icon(Icons.replay_outlined),
             label: '복습',
           ),
           NavigationDestination(
@@ -334,17 +318,171 @@ class _MainShellState extends State<MainShell> {
   }
 }
 
-class Metric extends StatelessWidget {
+class Home extends StatefulWidget {
+  const Home({super.key});
+
+  @override
+  State<Home> createState() => _HomeState();
+}
+
+class _HomeState extends State<Home> {
+  bool busy = false;
+
+  Future<void> update() async {
+    setState(() => busy = true);
+
+    try {
+      final n = await Db.instance.sync();
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            n == 0
+                ? '새 단어가 없습니다.'
+                : '$n개 단어를 추가했습니다.',
+          ),
+        ),
+      );
+
+      setState(() {});
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('업데이트 실패: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<Word>>(
+      future: Db.instance.all(),
+      builder: (context, s) {
+        if (!s.hasData) {
+          return const Center(
+            child: CircularProgressIndicator(),
+          );
+        }
+
+        final words = s.data!;
+
+        final c = words.fold<int>(
+          0,
+          (a, w) => a + w.correct,
+        );
+
+        final x = words.fold<int>(
+          0,
+          (a, w) => a + w.wrong,
+        );
+
+        final rate =
+            c + x == 0 ? 0 : (100 * c / (c + x)).round();
+
+        final due = words
+            .where(
+              (w) => !w.dueAt.isAfter(DateTime.now()),
+            )
+            .length;
+
+        return ListView(
+          padding: const EdgeInsets.all(18),
+          children: [
+            const Text(
+              '매일 조금씩, 확실하게.',
+              style: TextStyle(
+                fontSize: 25,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'JLPT N4 어휘를 차근차근 익혀 보세요.',
+              style: TextStyle(color: Colors.black54),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                _Metric('전체 단어', '${words.length}', '개'),
+                _Metric('복습 예정', '$due', '개'),
+                _Metric('정답률', '$rate', '%'),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '단어 목록 업데이트',
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      '앱 실행 시 GitHub에서 새 단어를 확인합니다. '
+                      '아래 버튼으로 직접 업데이트할 수도 있습니다.',
+                      style: TextStyle(color: Colors.black54),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: busy ? null : update,
+                        icon: busy
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.sync),
+                        label: Text(
+                          busy ? '확인 중...' : '수동 업데이트',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.menu_book),
+                title: const Text('저장된 단어'),
+                subtitle: Text('${words.length}개'),
+              ),
+            ),
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.replay),
+                title: const Text('복습할 단어'),
+                subtitle: Text('$due개'),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _Metric extends StatelessWidget {
   final String label;
   final String value;
   final String unit;
 
-  const Metric(
-    this.label,
-    this.value,
-    this.unit, {
-    super.key,
-  });
+  const _Metric(this.label, this.value, this.unit);
 
   @override
   Widget build(BuildContext context) {
@@ -353,7 +491,7 @@ class Metric extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.symmetric(
             vertical: 16,
-            horizontal: 8,
+            horizontal: 4,
           ),
           child: Column(
             children: [
@@ -368,8 +506,8 @@ class Metric extends StatelessWidget {
               Text(
                 value,
                 style: const TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.w700,
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
               Text(
@@ -387,329 +525,138 @@ class Metric extends StatelessWidget {
   }
 }
 
-class Dashboard extends StatefulWidget {
-  const Dashboard({super.key});
+class Voice {
+  static final tts = FlutterTts();
 
-  @override
-  State<Dashboard> createState() => _DashboardState();
+  static Future<void> say(String text) async {
+    await tts.setLanguage('ja-JP');
+    await tts.setSpeechRate(0.45);
+    await tts.speak(text);
+  }
 }
 
-class _DashboardState extends State<Dashboard> {
-  bool updating = false;
+class Learn extends StatefulWidget {
+  const Learn({super.key});
 
-  Future<void> updateWords() async {
-    setState(() => updating = true);
+  @override
+  State<Learn> createState() => _LearnState();
+}
 
-    try {
-      final count =
-          await WordDb.instance.syncRemoteWords();
+class _LearnState extends State<Learn> {
+  late Future<List<Word>> future;
+  int index = 0;
+  bool reveal = false;
 
-      if (!mounted) return;
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            count == 0
-                ? '새로운 단어가 없습니다.'
-                : '$count개의 단어를 추가했습니다.',
-          ),
-        ),
-      );
-
-      setState(() {});
-    } catch (_) {
-      if (!mounted) return;
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            '업데이트에 실패했습니다. 인터넷을 확인해 주세요.',
-          ),
-        ),
-      );
-    } finally {
-      if (mounted) {
-        setState(() => updating = false);
-      }
-    }
+  @override
+  void initState() {
+    super.initState();
+    future = Db.instance.all();
   }
 
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<List<Word>>(
-      future: WordDb.instance.all(),
-      builder: (context, snapshot) {
-        if (!snapshot.hasData) {
+      future: future,
+      builder: (context, s) {
+        if (!s.hasData) {
           return const Center(
             child: CircularProgressIndicator(),
           );
         }
 
-        final words = snapshot.data!;
+        final words = s.data!;
 
-        final due = words
-            .where(
-              (word) =>
-                  !word.dueAt.isAfter(DateTime.now()),
-            )
-            .length;
+        if (words.isEmpty) return const _Empty();
 
-        final correct = words.fold<int>(
-          0,
-          (sum, word) => sum + word.correctCount,
-        );
+        final w = words[index % words.length];
 
-        final wrong = words.fold<int>(
-          0,
-          (sum, word) => sum + word.wrongCount,
-        );
-
-        final rate = correct + wrong == 0
-            ? 0
-            : (correct / (correct + wrong) * 100).round();
-
-        return ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            const Text(
-              '오늘도 조금씩, 꾸준하게.',
-              style: TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 7),
-            const Text(
-              'JLPT N4 단어를 차근차근 익혀 보세요.',
-              style: TextStyle(color: Colors.black54),
-            ),
-            const SizedBox(height: 20),
-            Row(
-              children: [
-                Metric('전체 단어', '${words.length}', '개'),
-                const SizedBox(width: 8),
-                Metric('복습할 단어', '$due', '개'),
-                const SizedBox(width: 8),
-                Metric('정답률', '$rate', '%'),
-              ],
-            ),
-            const SizedBox(height: 18),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(18),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      '오늘의 학습',
-                      style: TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 7),
-                    const Text(
-                      '단어를 익히고 양방향 시험으로 기억을 확인해 보세요.',
-                      style: TextStyle(color: Colors.black54),
-                    ),
-                    const SizedBox(height: 14),
-                    FilledButton.icon(
-                      onPressed: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => const StudyPage(),
-                          ),
-                        );
-                      },
-                      icon: const Icon(Icons.play_arrow),
-                      label: const Text('단어 학습 시작'),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 10),
-            OutlinedButton.icon(
-              onPressed: updating ? null : updateWords,
-              icon: updating
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                      ),
-                    )
-                  : const Icon(Icons.sync),
-              label: Text(
-                updating ? '업데이트 중...' : '단어 목록 업데이트',
-              ),
-            ),
-          ],
-        );
-      },
-    );
-  }
-}
-
-class StudyPage extends StatefulWidget {
-  const StudyPage({super.key});
-
-  @override
-  State<StudyPage> createState() => _StudyPageState();
-}
-
-class _StudyPageState extends State<StudyPage> {
-  final tts = FlutterTts();
-
-  List<Word> words = [];
-  int index = 0;
-  bool reveal = false;
-  bool loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    tts.setLanguage('ja-JP');
-    tts.setSpeechRate(0.42);
-    load();
-  }
-
-  Future<void> load() async {
-    final result = await WordDb.instance.all();
-
-    if (!mounted) return;
-
-    setState(() {
-      words = result;
-      loading = false;
-    });
-  }
-
-  @override
-  void dispose() {
-    tts.stop();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (loading) {
-      return const Center(
-        child: CircularProgressIndicator(),
-      );
-    }
-
-    if (words.isEmpty) {
-      return const Center(
-        child: Text('등록된 단어가 없습니다. 홈에서 단어를 업데이트해 주세요.'),
-      );
-    }
-
-    final word = words[index % words.length];
-
-    return Padding(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        return Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(
             children: [
-              Text(
-                '단어 ${index + 1} / ${words.length}',
-                style: const TextStyle(color: Colors.black54),
-              ),
-              Text(
-                word.pos,
-                style: const TextStyle(color: Colors.black45),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          LinearProgressIndicator(
-            value: (index + 1) / words.length,
-            minHeight: 5,
-            color: Colors.black87,
-            backgroundColor: Colors.black12,
-          ),
-          const Spacer(),
-          Card(
-            child: SizedBox(
-              width: double.infinity,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 40,
-                  horizontal: 18,
-                ),
-                child: Column(
-                  children: [
-                    Text(
-                      word.jp,
-                      style: const TextStyle(
-                        fontSize: 42,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      word.reading,
-                      style: const TextStyle(
-                        fontSize: 19,
-                        color: Colors.black54,
-                      ),
-                    ),
-                    const SizedBox(height: 22),
-                    if (reveal) ...[
-                      Text(
-                        word.meaning,
-                        style: const TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.w600,
+              Text('단어 ${index + 1} / ${words.length}'),
+              Expanded(
+                child: Center(
+                  child: Card(
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              w.jp,
+                              style: const TextStyle(
+                                fontSize: 40,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              w.reading,
+                              style: const TextStyle(
+                                fontSize: 20,
+                                color: Colors.black54,
+                              ),
+                            ),
+                            const SizedBox(height: 22),
+                            if (reveal) ...[
+                              Text(
+                                w.meaning,
+                                style: const TextStyle(
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              Text(
+                                w.pos,
+                                style: const TextStyle(
+                                  color: Colors.black54,
+                                ),
+                              ),
+                              if (w.example.isNotEmpty) ...[
+                                const Divider(height: 28),
+                                Text(w.example),
+                                Text(w.exampleMeaning),
+                              ],
+                            ] else
+                              const Text(
+                                '뜻을 떠올린 뒤 확인해 보세요.',
+                              ),
+                            const SizedBox(height: 18),
+                            Row(
+                              mainAxisAlignment:
+                                  MainAxisAlignment.center,
+                              children: [
+                                IconButton.filledTonal(
+                                  onPressed: () => Voice.say(w.jp),
+                                  icon: const Icon(
+                                    Icons.volume_up,
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                FilledButton(
+                                  onPressed: () {
+                                    setState(() {
+                                      reveal = !reveal;
+                                    });
+                                  },
+                                  child: Text(
+                                    reveal ? '뜻 숨기기' : '뜻 확인',
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
                         ),
                       ),
-                      const SizedBox(height: 18),
-                      Text(
-                        word.example,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(fontSize: 17),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        word.exampleMeaning,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.black54,
-                        ),
-                      ),
-                    ] else
-                      const Text(
-                        '뜻을 떠올린 다음 확인해 보세요.',
-                        style: TextStyle(color: Colors.black45),
-                      ),
-                  ],
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          OutlinedButton.icon(
-            onPressed: () => tts.speak(word.jp),
-            icon: const Icon(Icons.volume_up_outlined),
-            label: const Text('발음 듣기'),
-          ),
-          const Spacer(),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: () {
-                    setState(() => reveal = !reveal);
-                  },
-                  child: Text(reveal ? '뜻 가리기' : '뜻 확인'),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
+              SizedBox(
+                width: double.infinity,
                 child: FilledButton(
                   onPressed: () {
                     setState(() {
@@ -722,87 +669,104 @@ class _StudyPageState extends State<StudyPage> {
               ),
             ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
 
-class QuizPage extends StatefulWidget {
-  const QuizPage({super.key});
+class Quiz extends StatefulWidget {
+  const Quiz({super.key});
 
   @override
-  State<QuizPage> createState() => _QuizPageState();
+  State<Quiz> createState() => _QuizState();
 }
 
-class _QuizPageState extends State<QuizPage> {
-  final input = TextEditingController();
-
+class _QuizState extends State<Quiz> {
   List<Word> words = [];
-  Word? current;
+  List<String> choices = [];
 
-  String direction = 'jp';
-  String feedback = '';
+  int at = 0;
+  int? selected;
 
-  bool? correct;
+  bool answered = false;
   bool loading = true;
+  bool reverse = false;
 
   @override
   void initState() {
     super.initState();
-    load();
+    start();
   }
 
-  Future<void> load() async {
-    final result = await WordDb.instance.all();
+  Future<void> start() async {
+    setState(() {
+      loading = true;
+      at = 0;
+      selected = null;
+      answered = false;
+    });
+
+    words = await Db.instance.all();
+    words.shuffle();
 
     if (!mounted) return;
 
     setState(() {
-      words = result;
       loading = false;
-      next();
+      prepare();
     });
   }
 
-  void next() {
+  void prepare() {
     if (words.isEmpty) {
-      current = null;
+      choices = [];
       return;
     }
 
-    final copy = [...words]..shuffle();
+    reverse = at.isOdd;
 
-    current = copy.first;
-    input.clear();
-    correct = null;
-    feedback = '';
+    final w = words[at];
+    final answer = reverse ? w.jp : w.meaning;
+
+    final others = words
+        .where((x) => x.id != w.id)
+        .map((x) => reverse ? x.jp : x.meaning)
+        .toSet()
+        .toList()
+      ..shuffle();
+
+    choices = ([answer, ...others.take(3)]..shuffle());
   }
 
-  Future<void> check() async {
-    if (current == null || correct != null) return;
+  Future<void> choose(int i) async {
+    if (answered) return;
 
-    final expected =
-        direction == 'jp' ? current!.meaning : current!.jp;
+    final w = words[at];
 
-    final actual = input.text.trim().replaceAll(' ', '');
-
-    final ok = actual == expected.replaceAll(' ', '');
-
-    await WordDb.instance.answer(current!.id, ok);
-
-    if (!mounted) return;
+    final ok = choices[i] ==
+        (reverse ? w.jp : w.meaning);
 
     setState(() {
-      correct = ok;
-      feedback = ok ? '정답입니다!' : '정답: $expected';
+      selected = i;
+      answered = true;
     });
+
+    await Db.instance.answer(w, ok);
   }
 
-  @override
-  void dispose() {
-    input.dispose();
-    super.dispose();
+  void next() {
+    if (at + 1 >= words.length) {
+      start();
+      return;
+    }
+
+    setState(() {
+      at++;
+      selected = null;
+      answered = false;
+      prepare();
+    });
   }
 
   @override
@@ -813,4 +777,14 @@ class _QuizPageState extends State<QuizPage> {
       );
     }
 
-    if (words.is
+    if (words.isEmpty) return const _Empty();
+
+    final w = words[at];
+    final answer = reverse ? w.jp : w.meaning;
+
+    return ListView(
+      padding: const EdgeInsets.all(18),
+      children: [
+        Text('문제 ${at + 1} / ${words.length}'),
+        Card(
+ 
