@@ -12,6 +12,10 @@ void main() async {
   runApp(const JlptApp());
 }
 
+unawaited(
+  WordDb.instance.syncRemoteWords().catchError((_) => 0),
+);
+
 class JlptApp extends StatelessWidget {
   const JlptApp({super.key});
   @override
