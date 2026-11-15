@@ -332,6 +332,71 @@ class _MainShellState extends State<MainShell> {
       ),
     );
   }
+static const String wordsUrl =
+    'https://raw.githubusercontent.com/everen-dust/JLPT/main/words.json';
+
+Future<int> syncRemoteWords() async {
+  final response = await http
+      .get(Uri.parse(wordsUrl))
+      .timeout(const Duration(seconds: 15));
+
+  if (response.statusCode != 200) {
+    throw Exception('단어 목록을 가져오지 못했습니다.');
+  }
+
+  final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+
+  if (decoded is! List) {
+    throw const FormatException('words.json 형식이 올바르지 않습니다.');
+  }
+
+  final db = await database;
+  var inserted = 0;
+
+  await db.transaction((txn) async {
+    for (final entry in decoded) {
+      if (entry is! Map) continue;
+
+      final item = <String, Object>{
+        'jp': (entry['jp'] ?? '').toString().trim(),
+        'reading': (entry['reading'] ?? '').toString().trim(),
+        'meaning': (entry['meaning'] ?? '').toString().trim(),
+        'pos': (entry['pos'] ?? '기타').toString().trim(),
+        'example': (entry['example'] ?? '').toString().trim(),
+        'exampleMeaning':
+            (entry['exampleMeaning'] ?? '').toString().trim(),
+      };
+
+      if ((item['jp'] as String).isEmpty ||
+          (item['reading'] as String).isEmpty ||
+          (item['meaning'] as String).isEmpty) {
+        continue;
+      }
+
+      final found = await txn.query(
+        'words',
+        columns: ['id'],
+        where: 'jp = ? AND reading = ?',
+        whereArgs: [item['jp'], item['reading']],
+        limit: 1,
+      );
+
+      if (found.isNotEmpty) continue;
+
+      await txn.insert('words', {
+        ...item,
+        'intervalDays': 0,
+        'dueAt': DateTime.now().millisecondsSinceEpoch,
+        'correctCount': 0,
+        'wrongCount': 0,
+      });
+
+      inserted++;
+    }
+  });
+
+  return inserted;
+}
 }
 
 class Metric extends StatelessWidget {
